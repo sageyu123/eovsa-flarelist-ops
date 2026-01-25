@@ -206,7 +206,7 @@ def fetch_flare_data_from_wiki(eo_wiki_urls, given_date_strp, outcsvfile):
                             depec_datafile_XP.append(datafile_XP)
 
         else:
-            print("Failed to retrieve the webpage. Status code:", response.status_code)
+            print(f"Failed to retrieve the webpage {eo_wiki_url}. Status code: {response.status_code}")
 
     # Reformatting and saving collected data into a DataFrame
     data = {
@@ -390,7 +390,7 @@ def download_datfiles_from_url(url, download_directory, timerange_strp):
                         except Exception as e:
                             print(f"Failed to download: {file_name} - {str(e)}")
     else:
-        print(f"Failed to retrieve the webpage. Status code: {response.status_code}")
+        print(f"Failed to retrieve the webpage {url}. Status code: {response.status_code}")
     return file_name_download
 
 
@@ -483,7 +483,9 @@ def parse_arguments():
     parser.add_argument('--timerange', '-t', type=str, nargs=2,
                         default=[(datetime.utcnow() - timedelta(days=7)).strftime('%Y-%m-%d 13:00:00'),
                                  datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')],
-                        help='Time range for the analysis, formatted as "YYYY-MM-DD HH:MM:SS YYYY-MM-DD HH:MM:SS".\nDefaults to 7 days ago from 13:00 UT to now.')
+                        help='Time range for the analysis, formatted as "YYYY-MM-DD HH:MM:SS YYYY-MM-DD HH:MM:SS".\n'
+                             'Backslashes (e.g., from cron-escaped date output) are tolerated.\n'
+                             'Defaults to 7 days ago from 13:00 UT to now.')
 
     parser.add_argument('--do_manu', type=int, default=0,
                         help='Manually determine the start/end time of the radio burst by clicking on the Dspec.\nDefault: 0.')
@@ -499,8 +501,26 @@ def main():
     timerange = args.timerange
     do_manu = args.do_manu
 
+    def _parse_timerange_datetime(value: str) -> datetime:
+        value = value.strip()
+        # Some schedulers (e.g., cron) require escaping '%' as '\\%'. Depending on how the command is invoked,
+        # those backslashes can survive into the expanded `date` output, producing strings like:
+        #   "\\2026-\\01-\\05 \\15:\\46:\\06"
+        # Strip backslashes so the canonical format parses cleanly.
+        if "\\" in value:
+            value = value.replace("\\", "")
+
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                return datetime.strptime(value, fmt)
+            except ValueError:
+                pass
+        raise ValueError(
+            f'Invalid datetime value: {value!r}. Expected "YYYY-MM-DD HH:MM:SS" (or "YYYY-MM-DDTHH:MM:SS").'
+        )
+
     # Convert timerange strings to datetime objects for internal use
-    timerange_strp = [datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S') for date_str in timerange]
+    timerange_strp = [_parse_timerange_datetime(date_str) for date_str in timerange]
 
     print(f"Fetching data for time range {timerange[0]} to {timerange[1]} with manual mode set to {do_manu}")
 
