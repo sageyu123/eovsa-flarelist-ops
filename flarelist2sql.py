@@ -119,7 +119,7 @@ except:
 
 
 ##=========================
-def fetch_flare_data_from_wiki(eo_wiki_urls, given_date_strp, outcsvfile):
+def fetch_flare_data_from_wiki(eo_wiki_urls, given_date_strp, outcsvfile, debug_wiki=False):
     """
     Fetches flare data from the given wiki URLs and saves it to a CSV file in the specified directory.
 
@@ -135,6 +135,24 @@ def fetch_flare_data_from_wiki(eo_wiki_urls, given_date_strp, outcsvfile):
     date_data, time_ut_data, flare_class_data, flare_ID_data = [], [], [], []
     depec_imgfile_XP, depec_datafile_XP = [], []
     depec_imgfile_TP, depec_datafile_TP = [], []
+    debug_rows = []
+
+    def _normalize_datetime(date_str, time_str):
+        date_clean = date_str.strip().replace('/', '-')
+        time_clean = time_str.strip()
+        time_clean = time_clean.replace('UTC', '').replace('UT', '').strip()
+        if re.match(r'^\d{2}:\d{2}$', time_clean):
+            time_clean = f"{time_clean}:00"
+        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
+            try:
+                return datetime.strptime(f"{date_clean} {time_clean}", fmt)
+            except ValueError:
+                pass
+        return None
+
+    def _clean_file_name(name):
+        name = requests.utils.unquote(os.path.basename(str(name).split('?')[0]))
+        return re.sub(r'^\d+px-', '', name)
 
     for eo_wiki_url in eo_wiki_urls:
         response = requests.get(eo_wiki_url)
@@ -152,53 +170,89 @@ def fetch_flare_data_from_wiki(eo_wiki_urls, given_date_strp, outcsvfile):
                         date = cells[0].text.strip()
                         time_ut = cells[1].text.strip()
                         flare_class = cells[2].text.strip()
-                        datetime_strp = datetime.strptime(date + ' ' + time_ut, '%Y-%m-%d %H:%M')
+                        datetime_strp = _normalize_datetime(date, time_ut)
+                        if datetime_strp is None:
+                            if debug_wiki:
+                                debug_rows.append({
+                                    'wiki_url': eo_wiki_url,
+                                    'date_raw': date,
+                                    'time_raw': time_ut,
+                                    'flare_class_raw': flare_class,
+                                    'reason': 'datetime_parse_failed',
+                                    'row_text': row.get_text(' ', strip=True)
+                                })
+                            continue
 
                         if given_date_strp[0] <= datetime_strp <= given_date_strp[1]:
                             # Get Date, Time (UT), and Flare Class
-                            date_data.append(date)
-                            time_ut_data.append(f"{time_ut}:00")
+                            date_norm = datetime_strp.strftime('%Y-%m-%d')
+                            time_norm = datetime_strp.strftime('%H:%M:%S')
+                            date_data.append(date_norm)
+                            time_ut_data.append(time_norm)
                             flare_class_data.append(flare_class)
 
                             # Get Flare_ID
-                            eotime = f"{date.replace('/', '-')}T{time_ut}:00"
+                            eotime = f"{date_norm}T{time_norm}"
                             flare_ID_data.append(eotime.replace('-', '').replace('T', '').replace(':', ''))
                             print("Fetched: ", eotime)
 
                             # Initialize placeholders for spectrogram files
                             imgfile_XP, datafile_XP, imgfile_TP, datafile_TP = '', '', '', ''
                             
-                            # Extracting spectrogram data files based on file names
-                            for cell in cells:
-                                # Find external links to data files
-                                link_cell = cell.find('a', class_='external text', href=True, rel='nofollow')
+                            link_files = []
+                            image_files = []
 
-                                if link_cell:
-                                    url = link_cell['href']
-                                    file_name = url.split('/')[-1]
-                                    if "eovsa.spec_xp." in file_name or "eovsa.spec." in file_name:
-                                        if file_name.endswith(".dat") or file_name.endswith(".fits"):
-                                            datafile_XP = file_name
-                                    if "eovsa.spec_tp" in file_name:
-                                        if file_name.endswith(".dat") or file_name.endswith(".fits"):
-                                            datafile_TP = file_name
+                            for link in row.find_all('a', href=True):
+                                href = str(link.get('href', ''))
+                                if not href:
+                                    continue
+                                href_file = _clean_file_name(href)
+                                if href_file and '.' in href_file:
+                                    link_files.append(href_file)
 
-                            # Extracting spectrogram image files based on file names
-                            for cell in cells:
-                                img_tag = cell.find('img')
-                                if img_tag:
-                                    src_attribute = img_tag.get('src')
-                                    if src_attribute:
-                                        file_name = src_attribute.split('/')[-1]
+                                # MediaWiki usually links thumbnails through /wiki/File:<name>.
+                                if 'File:' in href:
+                                    wiki_file = _clean_file_name(href.split('File:')[-1])
+                                    if wiki_file.lower().endswith('.png'):
+                                        image_files.append(wiki_file)
+
+                            for img_tag in row.find_all('img'):
+                                src_attribute = img_tag.get('src')
+                                if src_attribute:
+                                    image_files.append(_clean_file_name(src_attribute))
+
+                            for file_name in link_files:
+                                file_low = file_name.lower()
+                                if file_low.endswith(('.dat', '.fits')):
+                                    if ('eovsa.spec_tp' in file_low) and not datafile_TP:
+                                        datafile_TP = file_name
+                                    if (('eovsa.spec_xp.' in file_low) or ('eovsa.spec.' in file_low)) and not datafile_XP:
+                                        datafile_XP = file_name
+
+                            for file_name in image_files:
+                                file_low = file_name.lower()
+                                if file_low.endswith('.png'):
+                                    if ('.spec_tp.' in file_low) and not imgfile_TP:
+                                        imgfile_TP = file_name
+                                    if (('.spec_xp.' in file_low) or ('.spec.' in file_low)) and not imgfile_XP:
                                         imgfile_XP = file_name
-                                        if ".spec_tp." in file_name and file_name.endswith(".png"):
-                                            imgfile_TP = file_name  # Assign TP-specific file to imgfile_TP
-                                        if ".spec_xp." in file_name and file_name.endswith(".png"):
-                                            imgfile_XP = file_name  # Assign XP-specific file to imgfile_XP
-                                        if ".spec." in file_name and file_name.endswith(".png"):
-                                            imgfile_XP = file_name  # Assign XP-specific file to imgfile_XP
 
                             print(date, time_ut, flare_class, imgfile_XP, datafile_XP)
+                            if debug_wiki and (not datafile_XP or not imgfile_XP):
+                                debug_rows.append({
+                                    'wiki_url': eo_wiki_url,
+                                    'date': date_norm,
+                                    'time_ut': time_norm,
+                                    'flare_class': flare_class,
+                                    'datafile_tp': datafile_TP,
+                                    'imgfile_tp': imgfile_TP,
+                                    'datafile_xp': datafile_XP,
+                                    'imgfile_xp': imgfile_XP,
+                                    'link_files': ';'.join(sorted(set(link_files))),
+                                    'image_files': ';'.join(sorted(set(image_files))),
+                                    'reason': 'missing_xp_or_image',
+                                    'row_text': row.get_text(' ', strip=True)
+                                })
                             # Append extracted file names to respective lists
                             depec_imgfile_TP.append(imgfile_TP)
                             depec_datafile_TP.append(datafile_TP)
@@ -206,7 +260,10 @@ def fetch_flare_data_from_wiki(eo_wiki_urls, given_date_strp, outcsvfile):
                             depec_datafile_XP.append(datafile_XP)
 
         else:
-            print(f"Failed to retrieve the webpage {eo_wiki_url}. Status code: {response.status_code}")
+            if response.status_code == 404:
+                print(f"Wiki page not found (404), skipping: {eo_wiki_url}")
+            else:
+                print(f"Failed to retrieve the webpage {eo_wiki_url}. Status code: {response.status_code}")
 
     # Reformatting and saving collected data into a DataFrame
     data = {
@@ -223,6 +280,10 @@ def fetch_flare_data_from_wiki(eo_wiki_urls, given_date_strp, outcsvfile):
     df = pd.DataFrame(data)
     df.to_csv(outcsvfile, index=False)
     print(f"Data saved to {outcsvfile}")
+    if debug_wiki and debug_rows:
+        debug_file = os.path.splitext(outcsvfile)[0] + '_wiki_debug.csv'
+        pd.DataFrame(debug_rows).to_csv(debug_file, index=False)
+        print(f"Debug wiki parse data saved to {debug_file}")
     return
 
 ##=========================
@@ -489,6 +550,8 @@ def parse_arguments():
 
     parser.add_argument('--do_manu', type=int, default=0,
                         help='Manually determine the start/end time of the radio burst by clicking on the Dspec.\nDefault: 0.')
+    parser.add_argument('--debug_wiki', type=int, default=0,
+                        help='Enable verbose wiki parsing diagnostics and write *_wiki_debug.csv.\nDefault: 0.')
 
     return parser.parse_args()
 
@@ -500,6 +563,7 @@ def main():
 
     timerange = args.timerange
     do_manu = args.do_manu
+    debug_wiki = bool(args.debug_wiki)
 
     def _parse_timerange_datetime(value: str) -> datetime:
         value = value.strip()
@@ -543,7 +607,7 @@ def main():
     ##=========================Step 1: capture the radio peak times from flare list wiki webpage=========================
     print("##=============Step 1: capture the radio peak times from flare list wiki webpage")
     init_csv = os.path.join(work_dir, "get_time_from_wiki_given_date.csv")
-    fetch_flare_data_from_wiki(EO_WIKI_URLs, timerange_strp, init_csv)
+    fetch_flare_data_from_wiki(EO_WIKI_URLs, timerange_strp, init_csv, debug_wiki=debug_wiki)
 
 
     # ##=========================Step 2: add GOES infor to flarelist=========================
@@ -1003,6 +1067,7 @@ def main():
     cursor = connection.cursor()
     cursor.execute("SELECT Flare_ID FROM EOVSA_flare_list_wiki_tb")
     flare_id_exist = cursor.fetchall()
+    flare_id_exist_set = {int(row[0]) for row in flare_id_exist}
 
     cursor.close()
     connection.close()
@@ -1052,16 +1117,36 @@ def main():
 
     ##=========================
     for i in range(len(flare_id)):
-        if not any(int(flare_id[i]) == existing_flare_id[0] for existing_flare_id in flare_id_exist):
-            date = Time(dates[i] + ' ' + times[i]).jd
-            # newlist = [int(flare_id[i]), GOES_class[i], Time(EO_tstart[i]).jd, Time(EO_tpeak[i]).jd, Time(EO_tend[i]).jd, EO_xcen[i], EO_ycen[i], depec_file[i]]
-            newlist = [int(flare_id[i]), GOES_class[i], Time(EO_tstart[i]).jd, Time(EO_tpeak[i]).jd, Time(EO_tend[i]).jd, 
-                       str(depec_datafile_TP[i]), str(depec_imgfile_TP[i]), str(depec_datafile_XP[i]), str(depec_imgfile_XP[i]),
-                       Fpk_XP_3GHz[i], Fpk_XP_7GHz[i], Fpk_XP_11GHz[i], Fpk_XP_15GHz[i]]
-            values.append(newlist)
-            print("EOVSA_flare_list_wiki_tb Update for ", int(flare_id[i]))
+        flare_id_int = int(flare_id[i])
+        payload = [
+            flare_id_int, GOES_class[i], Time(EO_tstart[i]).jd, Time(EO_tpeak[i]).jd, Time(EO_tend[i]).jd,
+            str(depec_datafile_TP[i]), str(depec_imgfile_TP[i]), str(depec_datafile_XP[i]), str(depec_imgfile_XP[i]),
+            Fpk_XP_3GHz[i], Fpk_XP_7GHz[i], Fpk_XP_11GHz[i], Fpk_XP_15GHz[i]
+        ]
+        payload = [None if pd.isna(val) else val for val in payload]
 
-    values = [[None if pd.isna(val) else val for val in sublist] for sublist in values]
+        if flare_id_int not in flare_id_exist_set:
+            values.append(payload)
+            print("EOVSA_flare_list_wiki_tb Insert for ", flare_id_int)
+            continue
+
+        # Existing flare rows are updated in place to backfill fields that may have
+        # been missing in earlier parser runs.
+        update_cols = []
+        update_vals = []
+        for col_name, col_val in zip(columns[1:], payload[1:]):
+            if col_val is None:
+                continue
+            if isinstance(col_val, str) and col_val.strip() == '':
+                continue
+            update_cols.append(f"{col_name} = %s")
+            update_vals.append(col_val)
+
+        if update_cols:
+            update_query = f"UPDATE {table} SET " + ', '.join(update_cols) + " WHERE Flare_ID = %s"
+            update_vals.append(flare_id_int)
+            cursor.execute(update_query, tuple(update_vals))
+            print("EOVSA_flare_list_wiki_tb Refresh for ", flare_id_int)
 
     put_query = 'insert ignore into ' + table + ' (' + ','.join(columns) + ') values (' + ('%s,' * len(columns))[
                                                                                           :-1] + ')'
